@@ -8,9 +8,9 @@
 
 Autoregent is a self-hosted API gateway you drop in front of a flaky upstream. When a response drifts from its expected schema, Gemini diagnoses the drift live in the request path and proposes a fix — but the caller's `200 OK` and a signed disclosure event fire together, every time. A heal is never a secret, and write/transactional routes are never healed at all.
 
-`pip install autoregent` gets you a Python object, not a hosted service — you run it yourself, against your own upstream, with your own schemas.
-
-**Docs:** [DOCUMENTATION.md](DOCUMENTATION.md) — full architecture, module, and config reference.
+**Live gateway:** https://autoregent-production.up.railway.app
+**Live dashboard:** https://vladlen-codes.github.io/autoregent/
+**Docs:** [DOCUMENTATION.md](DOCUMENTATION.md)
 
 ---
 
