@@ -20,6 +20,12 @@ from autoregent.demo import AccountBalance  # replace with your own schema(s)
 
 config = AutoregentConfig.from_env()  # reads GEMINI_API_KEY etc. from .env
 
+# Gemini is the default diagnoser, inferred from GEMINI_API_KEY. To use a
+# different provider instead, install the extra and pass it explicitly:
+#   from autoregent.diagnosers import OpenAIDiagnoser, AnthropicDiagnoser
+#   diagnoser = OpenAIDiagnoser(api_key="sk-...")
+# ...then add diagnoser=diagnoser to the Autoregent(...) call below.
+
 rules = (
     RouteRules()
     # Write paths -- transfers, charges, ledger entries -- are never healed,
@@ -39,7 +45,7 @@ UPSTREAM_TIMEOUT_SECONDS=5.0
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-flash-lite-latest
 GEMINI_TIMEOUT_SECONDS=3.0
-GEMINI_CONFIDENCE_THRESHOLD=0.85
+CONFIDENCE_THRESHOLD=0.85
 LOG_LEVEL=INFO
 # Change this for any real deployment -- proves integrity, not non-repudiation.
 HMAC_SECRET=change-me-in-production

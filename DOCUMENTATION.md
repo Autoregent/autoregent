@@ -64,7 +64,7 @@ Every terminal state — clean pass, healed, failed loud, loop suppressed, or bu
 | `circuit.py` | `RouteCircuit` (the `CLOSED → OPEN → HALF_OPEN → CLOSED` breaker, one instance per route) and `CircuitRegistry`, both constructed with an explicit `AutoregentConfig` |
 | `dispatch.py` | `dispatch_upstream(config, ...)` — the actual `httpx` call to the upstream, shared by the primary dispatch and any fallback dispatch |
 | `heal_pipeline.py` | `HealPipeline` — orchestrates loop detection, budget checks, the transactional short-circuit, and the Gemini heal attempt; constructed with `(config, rules, circuits, events)` |
-| `gemini_diagnosis.py` | `diagnose_drift(config, ...)` — the Gemini API call: structured output, timeout, and the wire-format workaround for the Developer API's schema constraints |
+| `diagnosers/` | The provider seam: `Diagnoser` (the ABC), `GeminiDiagnoser` (default), `OpenAIDiagnoser`, `AnthropicDiagnoser`, plus the shared prompt and wire format — see § 8 |
 | `heal_executor.py` | Pure field remapping (`apply_field_mapping`) and the deterministic validation gate (`validate_healed_payload`) |
 | `diagnosis.py` | `DriftDiagnosis` — Gemini's structured output contract |
 | `events.py` | `HealEvent`, `FailureReason`, and `EventStore` (in-memory by default; subclass to persist elsewhere) |
@@ -101,16 +101,16 @@ If the upstream's failure body contains a `fallback_target` key, the gateway che
 
 Two independent limits, both enforced: `max_heals_per_transaction` (default 2) bounds a single request's fallback chain, and a rolling window (default 5 heals per 60 seconds, per route) bounds sustained load on one route. Either limit reached trips the circuit hard for that route.
 
-### 3.7 Gemini diagnosis (`gemini_diagnosis.py`)
+### 3.7 Diagnosis (`diagnosers/`)
 
 Called only for informational routes with a registered expected schema, only after loop/budget checks pass, and only when the failure is a schema-drift-on-200 (not a transport failure — there's no payload shape to diagnose from a raw 5xx). The request carries the failed payload, the expected JSON Schema, and the specific Pydantic validation error diff. The response uses the API's strict structured-output mode.
 
-**Wire-format note:** the public `DriftDiagnosis.field_mapping` type is `dict[str, str]`, but the Gemini Developer API's structured-output mode rejects any schema containing `additionalProperties` (which is what Pydantic generates for an open-ended dict). The actual API call therefore requests a list of `{expected_field, source_field}` pairs and converts it to the dict shape internally — see `_GeminiDriftResponse` in `gemini_diagnosis.py`.
+**Wire-format note:** the public `DriftDiagnosis.field_mapping` type is `dict[str, str]`, but strict structured-output modes reject any schema containing `additionalProperties` (which is what Pydantic generates for an open-ended dict). The Gemini Developer API rejects it outright (Vertex AI Enterprise mode does not), and OpenAI's strict `json_schema` mode carries the same constraint. Every adapter therefore requests a list of `{expected_field, source_field}` pairs and converts it to the dict shape internally — see `WireDriftDiagnosis` in `diagnosers/base.py`, which is shared by all three built-in adapters.
 
 **Four fail-loud guards**, all enforced in code after the response comes back:
-1. The call times out (`gemini_timeout_seconds`, default 3s) → `None`, fail loud.
+1. The call times out (the diagnoser's own `timeout_seconds`, default 3s) → `None`, fail loud.
 2. The API call errors or returns something that fails its own schema validation → `None`, fail loud.
-3. `confidence < gemini_confidence_threshold` (default 0.85) → fail loud.
+3. `confidence < confidence_threshold` (default 0.85) → fail loud.
 4. `drift_type == "unrecoverable"` or `recommendation != "heal"` → fail loud.
 
 If `gemini_api_key` is unset, diagnosis is skipped entirely and every drift fails loud — this is a supported mode, not an error state.
@@ -150,7 +150,7 @@ On a successful heal, the caller receives `200` and five headers: `X-Autoregent-
 
 ### `FailureReason` values
 
-`circuit_open_precheck` · `transactional_short_circuit` · `loop_detected` · `budget_exhausted_transaction` · `budget_exhausted_window` · `transport_failure_no_diagnosis` · `gemini_unavailable` · `gemini_declined` · `heal_executor_missing_source` · `validation_gate_blocked` · `no_expected_schema`
+`circuit_open_precheck` · `transactional_short_circuit` · `loop_detected` · `budget_exhausted_transaction` · `budget_exhausted_window` · `transport_failure_no_diagnosis` · `diagnoser_unavailable` · `diagnosis_declined` · `heal_executor_missing_source` · `validation_gate_blocked` · `no_expected_schema`
 
 This field exists because `outcome: "failed_loud"` alone is ambiguous — it's the terminal state for at least six structurally different reasons.
 
@@ -175,10 +175,10 @@ class DriftDiagnosis(BaseModel):
 |---|---|---|
 | `upstream_base_url` / `UPSTREAM_BASE_URL` | `http://localhost:8000` | Where `/proxy/{path}` actually dispatches to |
 | `upstream_timeout_seconds` / `UPSTREAM_TIMEOUT_SECONDS` | `5.0` | Per-request upstream dispatch timeout |
-| `gemini_api_key` / `GEMINI_API_KEY` | `None` | Required for healing; absent means every drift fails loud |
-| `gemini_model` / `GEMINI_MODEL` | `gemini-flash-lite-latest` | See § 7 for why this model specifically |
-| `gemini_timeout_seconds` / `GEMINI_TIMEOUT_SECONDS` | `3.0` | Hard timeout on the diagnosis call |
-| `gemini_confidence_threshold` / `GEMINI_CONFIDENCE_THRESHOLD` | `0.85` | Minimum confidence to authorize a heal |
+| `gemini_api_key` / `GEMINI_API_KEY` | `None` | Seeds the default `GeminiDiagnoser` (§ 8). Absent, with no explicit `diagnoser=`, means every drift fails loud |
+| `gemini_model` / `GEMINI_MODEL` | `gemini-flash-lite-latest` | Model for the default Gemini diagnoser; see § 7 for why this one |
+| `gemini_timeout_seconds` / `GEMINI_TIMEOUT_SECONDS` | `3.0` | Hard timeout for the default Gemini diagnoser |
+| `confidence_threshold` / `CONFIDENCE_THRESHOLD` | `0.85` | Minimum confidence to authorize a heal. Provider-agnostic — enforced by the pipeline for every diagnoser, not by the adapter |
 | `log_level` / `LOG_LEVEL` | `INFO` | |
 | `max_heals_per_transaction` / `MAX_HEALS_PER_TRANSACTION` | `2` | Per-request fallback-chain budget |
 | `rolling_window_seconds` / `ROLLING_WINDOW_SECONDS` | `60.0` | Budget window duration |
@@ -217,14 +217,41 @@ A few non-obvious things discovered empirically, kept here so they aren't redisc
 - **Pydantic lax validation coerces types silently.** `model_validate()` on a plain dict will happily turn `"542.1"` into `542.1`, which would make the validation gate blind to exactly the type-drift class it exists to catch. Fixed by validating raw JSON bytes with `model_validate_json(..., strict=True)` instead of a pre-parsed dict.
 - **The Gemini Developer API rejects `additionalProperties` schemas.** A `dict[str, str]` field in a Pydantic model generates that constraint; the API errors on it. Vertex AI's enterprise mode supports it, the plain AI Studio key used here does not. Worked around with a list-of-pairs wire format (§ 3.7).
 - **`gemini-2.5-flash` returns 404 for new API keys** — deprecated. `gemini-flash-latest` works but was measured at 14+ seconds and returned `503 UNAVAILABLE` under test load, unusable against a 3-second budget. `gemini-flash-lite-latest` measured at ~1.4s and is the default.
+- **The 3-second default budget is tight, and provider latency drifts.** The same diagnosis call has been observed at ~1.4s, ~1.9s, and >3s (a timeout) on different days against an unchanged payload; the first call in a fresh process also pays client setup. A timeout is handled correctly — it fails loud rather than healing blind — but if you see sporadic `diagnoser_unavailable` events with no other explanation, raise `timeout_seconds` on the diagnoser before suspecting anything else.
 - **Editable installs (`pip install -e .`) can intermittently fail to resolve** in some shell/venv setups even when `pip show` confirms installation and the `.pth` file is correct. If `import autoregent` fails despite a clean install, set `PYTHONPATH` explicitly to `src/` as a diagnostic step.
 
 ---
 
-## 8. Known limitations (v0.1)
+## 8. AI providers
+
+Diagnosis sits behind `Diagnoser` (`diagnosers/base.py`) — one abstract method:
+
+```python
+async def diagnose(
+    self, route: str, expected_schema: dict, validation_error: str, original_payload: dict
+) -> DriftDiagnosis | None
+```
+
+| Adapter | Install | Default model | Structured output via |
+|---|---|---|---|
+| `GeminiDiagnoser` | core (`google-genai` is a required dependency) | `gemini-flash-lite-latest` | native `response_schema` |
+| `OpenAIDiagnoser` | `pip install "autoregent[openai]"` | `gpt-4o-mini` | strict `json_schema` parse |
+| `AnthropicDiagnoser` | `pip install "autoregent[anthropic]"` | `claude-haiku-4-5-20251001` | forced tool call |
+
+`Autoregent(diagnoser=...)` accepts any of them, or your own subclass. Passing nothing falls back to Gemini when `config.gemini_api_key` is set, and to no diagnoser at all otherwise — in which case every drift fails loud.
+
+The optional adapters import their SDK lazily inside `diagnose`, so importing them never requires the package to be installed; only running a diagnosis does. A missing SDK raises `ImportError` naming the extra to install — that's a deployment mistake, not a runtime condition, so it is the one failure mode adapters raise rather than swallow.
+
+**What a provider can and cannot do:** it can authorize a heal, or decline one. It cannot force one through. The confidence threshold, the `unrecoverable`/`fail_loud` check, the pure-remap executor, and the deterministic validation gate all live in the pipeline (§ 3.7–3.9), not in the adapter. Returning `None` from `diagnose` always means "fail loud", and every adapter converts its own timeouts, transport errors, and malformed responses into `None` rather than raising — so an unreachable provider degrades into a loud failure instead of a 500.
+
+To add a provider, subclass `Diagnoser`, build the prompt with the shared `build_prompt` helper, request the `WireDriftDiagnosis` shape (§ 3.7), and return `.to_diagnosis()` — or `None`.
+
+---
+
+## 9. Known limitations (v0.1)
 
 - **State is in-memory and single-node by default.** A restart clears `EventStore` entirely; subclass `EventStore` to add persistence.
 - **HMAC proves integrity, not non-repudiation.** A shared secret means anyone with `hmac_secret` could forge a signature. A real deployment needs asymmetric signing into WORM storage.
 - **No replay protection** on the trace header or signature.
 - **Circuit state is not shared across instances.** Horizontal scaling would break budget enforcement as built — each instance would track its own independent circuit state.
-- **Diagnosis is Gemini-only.** There is no pluggable provider abstraction yet — `gemini_diagnosis.py` is the single integration point if you need to swap or add a provider.
+- **Provider model defaults are pinned in code**, not tracked against each provider's current lineup. Pass an explicit `model=` for anything long-lived rather than inheriting an adapter's default.

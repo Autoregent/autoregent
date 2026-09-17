@@ -16,6 +16,8 @@ See DOCUMENTATION.md for the full pipeline reference.
 
 from .circuit import CircuitRegistry, CircuitState, RouteCircuit
 from .config import AutoregentConfig
+from .diagnosers.base import Diagnoser
+from .diagnosers.gemini import GeminiDiagnoser
 from .diagnosis import DriftDiagnosis
 from .events import EventStore, FailureReason, HealEvent
 from .gateway import Autoregent, __version__
@@ -26,6 +28,8 @@ __all__ = [
     "AutoregentConfig",
     "RouteRules",
     "RouteClass",
+    "Diagnoser",
+    "GeminiDiagnoser",
     "HealEvent",
     "FailureReason",
     "DriftDiagnosis",

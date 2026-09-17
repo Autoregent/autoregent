@@ -10,7 +10,7 @@ from .config import AutoregentConfig
 from .diagnosis import DriftDiagnosis
 from .dispatch import dispatch_upstream
 from .events import EventStore, HealEvent
-from .gemini_diagnosis import diagnose_drift
+from .diagnosers.base import Diagnoser
 from .heal_executor import apply_field_mapping, validate_healed_payload
 from .logging_config import log_event
 from .rules import RouteClass, RouteRules
@@ -65,11 +65,21 @@ class HealPipeline:
     (e.g. in tests, or two Autoregent instances in one process) never share
     state by accident."""
 
-    def __init__(self, config: AutoregentConfig, rules: RouteRules, circuits: CircuitRegistry, events: EventStore) -> None:
+    def __init__(
+        self,
+        config: AutoregentConfig,
+        rules: RouteRules,
+        circuits: CircuitRegistry,
+        events: EventStore,
+        diagnoser: Diagnoser | None = None,
+    ) -> None:
         self.config = config
         self.rules = rules
         self.circuits = circuits
         self.events = events
+        # None means no provider is configured at all. Every drift then fails
+        # loud -- a supported mode, not an error state.
+        self.diagnoser = diagnoser
 
     def validate_against_schema(self, path: str, content: bytes) -> str | None:
         """Returns a description of the drift, or None if the payload matches
@@ -207,15 +217,19 @@ class HealPipeline:
 
         validation_error = self.validate_against_schema(ctx.route, content) or "response diverged from the expected schema"
 
-        diagnosis = await diagnose_drift(self.config, ctx.route, schema.model_json_schema(), validation_error, original_payload)
+        diagnosis = (
+            await self.diagnoser.diagnose(ctx.route, schema.model_json_schema(), validation_error, original_payload)
+            if self.diagnoser is not None
+            else None
+        )
 
         if diagnosis is None:
-            self._record_event(ctx, "failed_loud", original_payload, failure_reason="gemini_unavailable")
+            self._record_event(ctx, "failed_loud", original_payload, failure_reason="diagnoser_unavailable")
             return _loud_response(ctx, status, content, headers, synthesize=True)
 
         if (
             diagnosis.recommendation != "heal"
-            or diagnosis.confidence < self.config.gemini_confidence_threshold
+            or diagnosis.confidence < self.config.confidence_threshold
             or diagnosis.drift_type == "unrecoverable"
         ):
             log_event(
@@ -223,7 +237,7 @@ class HealPipeline:
                 route=ctx.route, recommendation=diagnosis.recommendation,
                 confidence=diagnosis.confidence, drift_type=diagnosis.drift_type,
             )
-            self._record_event(ctx, "failed_loud", original_payload, failure_reason="gemini_declined", diagnosis=diagnosis)
+            self._record_event(ctx, "failed_loud", original_payload, failure_reason="diagnosis_declined", diagnosis=diagnosis)
             return _loud_response(ctx, status, content, headers, synthesize=True)
 
         healed_payload = apply_field_mapping(diagnosis.field_mapping, original_payload)

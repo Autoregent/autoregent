@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .circuit import CircuitRegistry, CircuitState
 from .config import AutoregentConfig
+from .diagnosers.base import Diagnoser
+from .diagnosers.gemini import GeminiDiagnoser
 from .dispatch import dispatch_upstream
 from .events import EventStore, HealEvent
 from .heal_pipeline import HealPipeline
@@ -14,6 +16,19 @@ from .rules import RouteClass, RouteRules
 from .transaction_context import TransactionContext
 
 __version__ = "0.1.0"
+
+
+def _default_diagnoser(config: AutoregentConfig) -> Diagnoser | None:
+    """Gemini is the zero-config default, but only when a key is actually
+    present. No key means no diagnoser at all, which means every drift fails
+    loud rather than silently passing through."""
+    if not config.gemini_api_key:
+        return None
+    return GeminiDiagnoser(
+        api_key=config.gemini_api_key,
+        model=config.gemini_model,
+        timeout_seconds=config.gemini_timeout_seconds,
+    )
 
 
 class Autoregent:
@@ -42,14 +57,16 @@ class Autoregent:
         self,
         config: AutoregentConfig | None = None,
         rules: RouteRules | None = None,
+        diagnoser: Diagnoser | None = None,
         *,
         cors_allow_origins: list[str] | None = None,
     ) -> None:
         self.config = config or AutoregentConfig()
         self.rules = rules or RouteRules()
+        self.diagnoser = diagnoser if diagnoser is not None else _default_diagnoser(self.config)
         self.circuits = CircuitRegistry(self.config)
         self.events = EventStore()
-        self._pipeline = HealPipeline(self.config, self.rules, self.circuits, self.events)
+        self._pipeline = HealPipeline(self.config, self.rules, self.circuits, self.events, self.diagnoser)
 
         configure_logging(self.config.log_level)
         self._logger = logging.getLogger("autoregent")
