@@ -1,6 +1,6 @@
 # Autoregent — Technical Documentation
 
-Companion to [README.md](README.md) (quick start, live links). This document is the detailed technical reference: every module, every endpoint, every configuration value, and exactly how a request moves through the system.
+Companion to [README.md](README.md) (install, quick start). This document is the detailed technical reference: every module, every endpoint, every configuration value, and exactly how a request moves through the system.
 
 ---
 
