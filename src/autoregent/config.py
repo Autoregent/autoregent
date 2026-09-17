@@ -18,7 +18,7 @@ class AutoregentConfig(BaseModel):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-flash-lite-latest"
     gemini_timeout_seconds: float = 3.0
-    gemini_confidence_threshold: float = 0.85
+    confidence_threshold: float = 0.85
 
     log_level: str = "INFO"
 
@@ -46,7 +46,7 @@ class AutoregentConfig(BaseModel):
             gemini_api_key: str | None = None
             gemini_model: str = "gemini-flash-lite-latest"
             gemini_timeout_seconds: float = 3.0
-            gemini_confidence_threshold: float = 0.85
+            confidence_threshold: float = 0.85
             log_level: str = "INFO"
             max_heals_per_transaction: int = 2
             rolling_window_seconds: float = 60.0

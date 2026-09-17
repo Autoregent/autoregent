@@ -30,7 +30,7 @@ def test_signature_changes_with_secret():
 
 def test_signature_changes_when_event_content_changes():
     healed = _event(outcome="healed")
-    failed = _event(outcome="failed_loud", failure_reason="gemini_declined")
+    failed = _event(outcome="failed_loud", failure_reason="diagnosis_declined")
     assert sign_event("secret", healed) != sign_event("secret", failed)
 
 

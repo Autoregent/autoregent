@@ -26,7 +26,15 @@ You register which routes are transactional (ledger writes, transfers, charges) 
 pip install autoregent
 ```
 
-Requires Python 3.11+ and a Gemini API key ([aistudio.google.com](https://aistudio.google.com/apikey)) if you want live healing — without a key, drift detection still runs but every heal fails loud instead of blind, which is itself a useful mode.
+Requires Python 3.11+ and an API key for one AI provider if you want live healing — without one, drift detection still runs but every heal fails loud instead of blind, which is itself a useful mode.
+
+Gemini is the built-in default ([get a key](https://aistudio.google.com/apikey)). OpenAI and Anthropic are optional extras:
+
+```bash
+pip install "autoregent[openai]"     # adds OpenAI support
+pip install "autoregent[anthropic]"  # adds Anthropic support
+pip install "autoregent[all]"        # both
+```
 
 ## Use it two ways
 
@@ -77,6 +85,42 @@ curl -i http://localhost:8000/proxy/mock/txn/field_rename  # same drift, but TRA
 curl http://localhost:8000/events                        # every heal/fail/suppress/trip, signed
 curl http://localhost:8000/health                         # circuit state per route
 ```
+
+## Choose your AI provider
+
+Diagnosis sits behind a one-method seam, so the provider is just a constructor argument:
+
+```python
+from autoregent import Autoregent, AutoregentConfig
+from autoregent.diagnosers import AnthropicDiagnoser, OpenAIDiagnoser
+
+# Gemini — the default, inferred from config.gemini_api_key. No diagnoser needed.
+Autoregent(config=AutoregentConfig(gemini_api_key="..."))
+
+# OpenAI
+Autoregent(
+    config=AutoregentConfig(upstream_base_url="https://api.internal"),
+    diagnoser=OpenAIDiagnoser(api_key="sk-...", model="gpt-4o-mini"),
+)
+
+# Anthropic
+Autoregent(
+    config=AutoregentConfig(upstream_base_url="https://api.internal"),
+    diagnoser=AnthropicDiagnoser(api_key="sk-ant-...", model="claude-haiku-4-5-20251001"),
+)
+```
+
+Bring your own by subclassing `Diagnoser`:
+
+```python
+from autoregent import Diagnoser, DriftDiagnosis
+
+class MyDiagnoser(Diagnoser):
+    async def diagnose(self, route, expected_schema, validation_error, original_payload) -> DriftDiagnosis | None:
+        ...  # return a DriftDiagnosis, or None to force a loud failure
+```
+
+Returning `None` is always safe: it means "no usable diagnosis", and the request fails loud. Timeouts, transport errors, and malformed responses are all converted to `None` rather than raised, so an unreachable provider degrades into a loud failure instead of a 500. The confidence threshold and all four fail-loud guards are enforced by the pipeline, not the provider — a provider can *authorize* a heal, never force one.
 
 ## How a heal actually happens
 
